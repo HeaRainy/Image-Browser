@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Image Browser</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<div class="main">
+
+<div class="sidebar">
+
+<div class="root-title">Image Root</div>
+
+<div class="root-input-group">
+<input id="rootInput" placeholder="输入图像根目录路径 或 JSON 文件路径">
+<button onclick="loadRoot()">加载</button>
+<button onclick="saveRoot()">收藏</button>
+</div>
+
+<div id="savedRoots" class="saved-roots"></div>
+
+<!-- JSON 模式：Key 选择面板 -->
+<div id="jsonKeyPanel" class="json-key-panel" style="display:none;">
+  <div class="json-mode-header">
+    <span class="json-mode-badge">JSON 模式</span>
+    <button class="json-exit-btn" onclick="exitJsonMode(); if(rootDir) loadRoot();">✕ 退出</button>
+  </div>
+  <div class="json-key-title">📷 图片 Key</div>
+  <div id="jsonKeyList" class="json-key-list"></div>
+  <div id="jsonInfo" class="json-info"></div>
+</div>
+
+<div class="folder-toolbar">
+<button id="backBtn" class="back-btn">
+<span class="arrow">←</span>
+<span>Back</span>
+</button>
+</div>
+
+<div class="folder-panel">
+<ul id="folderList"></ul>
+</div>
+
+</div>
+
+
+<div class="content">
+<div id="galleryToolbar" class="gallery-toolbar">
+<button id="selectBtn" class="toolbar-btn" onclick="toggleSelectMode()">选择</button>
+<button id="deleteBtn" class="toolbar-btn delete-btn" style="display:none;" onclick="deleteSelectedImages()">删除</button>
+<button id="cancelSelectBtn" class="toolbar-btn" style="display:none;" onclick="exitSelectMode()">取消</button>
+<span id="selectCount" class="select-count"></span>
+<div class="toolbar-spacer"></div>
+<button id="selectAllBtn" class="toolbar-btn small" style="display:none;" onclick="selectAll()">全选</button>
+<button id="deselectAllBtn" class="toolbar-btn small" style="display:none;" onclick="deselectAll()">取消全选</button>
+</div>
+
+<!-- JSON 模式：当前选中 key 提示 -->
+<div id="jsonModeBar" class="json-mode-bar" style="display:none;">
+  <span id="jsonModeLabel" class="json-mode-label"></span>
+  <span id="jsonItemCount" class="json-item-count"></span>
+</div>
+
+<div id="gallery" class="gallery"></div>
+</div>
+
+</div>
+
+
+<div id="viewer">
+
+<div id="keyHelp" class="key-help" style="display:none;">
+<div class="card">
+<div><b>键盘操作</b></div>
+<div>← / A ：上一张</div>
+<div>→ / D ：下一张</div>
+<div>滚轮 ：缩放图片</div>
+<div>拖动 ：移动图片</div>
+<div>ESC ：关闭查看</div>
+</div>
+</div>
+
+<div id="imageInfo" class="image-info"></div>
+
+<img id="viewerImg">
+
+</div>
+
+
+
+
+<!-- 多图排列查看器 -->
+<div id="multiViewer">
+  <div id="multiViewerClose" class="multi-viewer-close" onclick="closeMultiViewer()">✕</div>
+  <div id="multiViewerGrid" class="multi-viewer-grid"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
