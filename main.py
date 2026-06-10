@@ -1,5 +1,6 @@
-import os
+﻿import os
 import json
+import time
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,7 +51,7 @@ def is_image_path(value):
 
 
 def _scan_image_keys(obj, keys, seen, depth=0):
-    """递归扫描 JSON 对象，找出值是图片路径的 key"""
+    """递归扫描 JSON 对象，找出值是图片路径的key"""
     if depth > 10:
         return
     if isinstance(obj, dict):
@@ -128,170 +129,154 @@ def flatten_json_items(data):
                         idx += 1
             elif isinstance(group_val, dict):
                 # 字典套字典：检查是否需要展开图片列表
-                # 如果 value 中有 key 的值是图片路径列表，展开为单独 item
-                has_image_list = False
-                for k, v in group_val.items():
-                    if isinstance(v, list) and len(v) > 0 and is_image_path(v[0]):
-                        has_image_list = True
-                        break
-
-                if has_image_list:
-                    # 展开图片列表：每个图片路径一个 item
-                    # 先收集非图片列表的字段作为共享属性
-                    shared = {}
-                    image_keys = {}
-                    for k, v in group_val.items():
-                        if isinstance(v, list) and len(v) > 0 and is_image_path(v[0]):
-                            image_keys[k] = v
-                        elif is_image_path(v):
-                            shared[k] = v
-                        elif not isinstance(v, list):
-                            shared[k] = v
-
-                    # 找到最长的图片列表作为主循环
-                    main_key = max(image_keys.keys(), key=lambda k: len(image_keys[k])) if image_keys else None
-                    if main_key:
-                        main_list = image_keys[main_key]
-                        for sub_idx, img_path in enumerate(main_list):
-                            item_copy = dict(shared)
-                            item_copy[main_key] = img_path
-                            # 其他图片列表 key 取对应索引的值
-                            for k, v in image_keys.items():
-                                if k != main_key and sub_idx < len(v):
-                                    item_copy[k] = v[sub_idx]
-                            item_copy["_index"] = idx
-                            item_copy["_group"] = group_key
-                            item_copy["_sub_index"] = sub_idx
-                            items.append(item_copy)
+                # 如果 value 中有多图片字段，则每个图片作为单独 item
+                image_keys = find_image_keys(group_val)
+                if image_keys:
+                    for img_key in image_keys:
+                        img_val = group_val[img_key]
+                        if isinstance(img_val, list):
+                            for img_path in img_val:
+                                if is_image_path(img_path):
+                                    items.append({
+                                        "_index": idx,
+                                        "_group": group_key,
+                                        "_sub_index": idx,
+                                        img_key: img_path
+                                    })
+                                    idx += 1
+                        elif is_image_path(img_val):
+                            items.append({
+                                "_index": idx,
+                                "_group": group_key,
+                                "_sub_index": idx,
+                                img_key: img_val
+                            })
                             idx += 1
-                    else:
-                        item_copy = dict(group_val)
-                        item_copy["_index"] = idx
-                        item_copy["_group"] = group_key
-                        items.append(item_copy)
-                        idx += 1
                 else:
-                    # 普通字典套字典：value 本身是一个 item
+                    # 无图片列表，整体作为一个 item
                     item_copy = dict(group_val)
                     item_copy["_index"] = idx
                     item_copy["_group"] = group_key
                     items.append(item_copy)
                     idx += 1
             elif is_image_path(group_val):
+                # 字典值直接是图片路径
                 items.append({
                     "_index": idx,
                     "_group": group_key,
-                    group_key: group_val
+                    "images": [group_val]
                 })
                 idx += 1
         return items
     return []
 
 
-def resolve_image_path(image_path, json_dir):
-    """
-    解析 JSON 中的图片路径为绝对路径。
-    支持绝对路径和相对路径（相对于 JSON 文件所在目录）。
-    """
-    if os.path.isabs(image_path):
-        return image_path
-    return os.path.normpath(os.path.join(json_dir, image_path))
+def resolve_image_path(path, json_dir):
+    """解析 JSON 中的图片路径为绝对路径"""
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(json_dir, path))
 
 
-# ============================================================
-# 原有路由
-# ============================================================
+def count_json_items(data):
+    """统计 JSON 中的条目数量"""
+    if isinstance(data, list):
+        return len([item for item in data if isinstance(item, dict)])
+    elif isinstance(data, dict):
+        count = 0
+        for group_val in data.values():
+            if isinstance(group_val, list):
+                count += len([item for item in group_val if isinstance(item, dict) or is_image_path(item)])
+            elif isinstance(group_val, dict):
+                image_keys = find_image_keys(group_val)
+                if image_keys:
+                    for img_key in image_keys:
+                        img_val = group_val[img_key]
+                        if isinstance(img_val, list):
+                            count += len([v for v in img_val if is_image_path(v)])
+                        elif is_image_path(img_val):
+                            count += 1
+                else:
+                    count += 1
+            elif is_image_path(group_val):
+                count += 1
+        return count
+    return 0
+
 
 @app.get("/")
 def index(request: Request):
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {}
-    )
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/clear_cache")
+def clear_cache():
+    """清理缩略图缓存"""
+    import shutil
+    if os.path.exists(THUMB_DIR):
+        shutil.rmtree(THUMB_DIR)
+        os.makedirs(THUMB_DIR, exist_ok=True)
+    return {"status": "cache cleared"}
 
 
 @app.get("/api/folders")
-def list_folders(root_dir: str, path: str = ""):
-
-    try:
-        current_path = safe_join(root_dir, path)
-    except:
-        return {"folders": []}
-
-    if not os.path.exists(current_path):
-        return {"folders": []}
+def get_folders(root_dir: str, path: str = ""):
+    """获取根目录或指定路径下的所有子文件夹"""
+    if path:
+        # 如果有 path 参数，返回该路径下的文件夹
+        target_path = safe_join(root_dir, path)
+    else:
+        target_path = root_dir
+    
+    if not os.path.isdir(target_path):
+        return []
 
     folders = []
-
-    try:
-        for entry in os.scandir(current_path):
-            if entry.is_dir():
-                folders.append(entry.name)
-    except:
-        pass
-
-    folders.sort()
-
-    return {
-        "folders": folders,
-        "path": path
-    }
+    for name in os.listdir(target_path):
+        full_path = os.path.join(target_path, name)
+        if os.path.isdir(full_path):
+            folders.append(name)
+    return sorted(folders)
 
 
 @app.get("/api/images")
-def list_images(root_dir: str, folder: str = "", page: int = 0):
-
-    try:
-        if folder:
-            folder_path = safe_join(root_dir, folder)
-        else:
-            folder_path = root_dir
-    except:
-        return {"images": [], "has_more": False}
-
-    if not os.path.exists(folder_path):
+def get_images(root_dir: str, folder: str, page: int = 0):
+    """分页获取图片列表"""
+    folder_path = safe_join(root_dir, folder)
+    if not os.path.isdir(folder_path):
         return {"images": [], "has_more": False}
 
     files = []
-
-    for entry in os.scandir(folder_path):
-
-        if not entry.is_file():
-            continue
-
-        name = entry.name.lower()
-
-        if name.endswith(("jpg", "jpeg", "png", "webp")):
-            files.append(entry.name)
+    for name in os.listdir(folder_path):
+        ext = os.path.splitext(name.lower())[1]
+        if ext in IMAGE_EXTENSIONS:
+            files.append(name)
 
     files.sort()
-
     start = page * PAGE_SIZE
     end = start + PAGE_SIZE
-
     page_files = files[start:end]
 
+    # 添加时间戳防止缓存
+    timestamp = int(time.time())
     urls = [
-        f"/thumb?root_dir={root_dir}&folder={folder}&filename={f}"
+        f"/thumb?root_dir={root_dir}&folder={folder}&filename={f}&t={timestamp}"
         for f in page_files
     ]
 
     return {
-        "images": urls,
-        "has_more": end < len(files)
+        "images": list(zip(page_files, urls)),
+        "has_more": end < len(files),
     }
 
 
 @app.get("/thumb")
 def get_thumb(root_dir: str, folder: str, filename: str):
+    """生成并返回缩略图"""
+    folder_path = safe_join(root_dir, folder)
+    file_path = safe_join(folder_path, filename)
 
-    try:
-        src_path = safe_join(root_dir, folder, filename)
-    except:
-        return {"error": "invalid path"}
-
-    if not os.path.exists(src_path):
+    if not os.path.isfile(file_path):
         return {"error": "file not found"}
 
     cache_folder = os.path.join(THUMB_DIR, folder)
@@ -299,142 +284,151 @@ def get_thumb(root_dir: str, folder: str, filename: str):
 
     thumb_path = os.path.join(cache_folder, filename + ".jpg")
 
-    if not os.path.exists(thumb_path):
+    # 获取文件修改时间
+    file_mtime = os.path.getmtime(file_path)
 
+    # 如果缩略图不存在或文件已更新，重新生成
+    if not os.path.exists(thumb_path) or os.path.getmtime(thumb_path) < file_mtime:
         try:
-
-            img = Image.open(src_path)
-
+            img = Image.open(file_path)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
-
             img.thumbnail(THUMB_SIZE)
-
             img.save(
                 thumb_path,
                 "JPEG",
                 quality=85,
-                optimize=True
             )
-
         except:
             return {"error": "image error"}
 
-    return FileResponse(thumb_path)
+    # 添加不缓存头
+    response = FileResponse(thumb_path)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/image")
 def get_image(root_dir: str, folder: str, filename: str):
+    """返回原始图片"""
+    folder_path = safe_join(root_dir, folder)
+    file_path = safe_join(folder_path, filename)
 
-    try:
-        path = safe_join(root_dir, folder, filename)
-    except:
-        return {"error": "invalid path"}
-
-    if not os.path.exists(path):
+    if not os.path.isfile(file_path):
         return {"error": "file not found"}
 
-    return FileResponse(path)
+    return FileResponse(file_path)
 
 
-@app.get("/api/image_info")
-def get_image_info(root_dir: str, folder: str, filename: str):
+@app.post("/api/delete")
+def delete_images(req: DeleteRequest, root_dir: str, folder: str):
+    """删除指定的图片文件"""
+    folder_path = safe_join(root_dir, folder)
 
-    try:
-        path = safe_join(root_dir, folder, filename)
-    except:
-        return {"error": "invalid path"}
-
-    if not os.path.exists(path):
-        return {"error": "file not found"}
-
-    try:
-        img = Image.open(path)
-
-        width, height = img.size
-        channels = len(img.getbands())
-
-        return {
-            "filename": filename,
-            "width": width,
-            "height": height,
-            "channels": channels
-        }
-
-    except:
-        return {"error": "image error"}
-
-
-@app.post("/api/delete_images")
-def delete_images(root_dir: str, folder: str, request: DeleteRequest):
-    """
-    删除指定的图片文件
-    """
     deleted = []
-    errors = []
+    for filename in req.filenames:
+        file_path = safe_join(folder_path, filename)
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                deleted.append(filename)
+                
+                # 同时删除对应的缩略图缓存
+                thumb_dir = os.path.join(THUMB_DIR, folder)
+                thumb_path = os.path.join(thumb_dir, filename + ".jpg")
+                if os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except Exception as e:
+                pass
 
-    for filename in request.filenames:
-        try:
-            path = safe_join(root_dir, folder, filename)
-        except:
-            errors.append({"filename": filename, "error": "invalid path"})
-            continue
-
-        if not os.path.exists(path):
-            errors.append({"filename": filename, "error": "file not found"})
-            continue
-
-        try:
-            os.remove(path)
-            deleted.append(filename)
-
-            # 同时删除对应的缩略图缓存
-            thumb_dir = os.path.join(THUMB_DIR, folder)
-            thumb_path = os.path.join(thumb_dir, filename + ".jpg")
-            if os.path.exists(thumb_path):
-                os.remove(thumb_path)
-
-        except Exception as e:
-            errors.append({"filename": filename, "error": str(e)})
-
-    return {
-        "deleted": deleted,
-        "errors": errors,
-        "total_deleted": len(deleted),
-        "total_errors": len(errors)
-    }
+    return {"deleted": deleted}
 
 
-# ============================================================
-# JSON 模式路由
-# ============================================================
+@app.get("/api/json_files")
+def get_json_files(json_dir: str):
+    """获取指定目录下的所有 JSON 文件"""
+    if not os.path.isdir(json_dir):
+        return []
 
-@app.get("/api/json_info")
-def get_json_info(json_path: str):
-    """
-    读取 JSON 文件，返回其中所有值是图片路径的 key 列表。
-    json_path: JSON 文件的绝对路径
-    """
+    json_files = []
+    for name in os.listdir(json_dir):
+        if name.endswith(".json"):
+            json_files.append(name)
+
+    return sorted(json_files)
+
+
+@app.get("/api/json_keys")
+def get_json_keys(json_path: str):
+    """获取 JSON 文件中所有包含图片路径的 key"""
     if not os.path.isfile(json_path):
-        return {"error": "file not found", "keys": []}
-
-    if not json_path.lower().endswith(".json"):
-        return {"error": "not a json file", "keys": []}
+        return []
 
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except Exception as e:
-        return {"error": f"json parse error: {str(e)}", "keys": []}
+    except:
+        return []
 
     keys = find_image_keys(data)
-    total_items = len(data) if isinstance(data, list) else 1
+    return keys
+
+
+@app.get("/api/json_info")
+def get_json_info(json_path: str):
+    """获取 JSON 文件的基本信息：keys 和总条目数"""
+    if not os.path.isfile(json_path):
+        return {"error": "file not found"}
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        return {"error": "failed to parse JSON"}
+
+    keys = find_image_keys(data)
+    total_items = count_json_items(data)
 
     return {
         "keys": keys,
-        "total_items": total_items,
-        "json_dir": os.path.dirname(json_path)
+        "total_items": total_items
     }
+
+
+@app.get("/api/json_structure")
+def get_json_structure(json_path: str):
+    """获取 JSON 文件的基本结构信息"""
+    if not os.path.isfile(json_path):
+        return {"error": "file not found"}
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        return {"error": "failed to parse JSON"}
+
+    # 判断基本类型
+    is_list = isinstance(data, list)
+    is_dict = isinstance(data, dict)
+
+    # 获取顶层 keys（如果是字典）
+    top_keys = []
+    if is_dict:
+        top_keys = list(data.keys())
+
+    return {
+        "is_list": is_list,
+        "is_dict": is_dict,
+        "top_keys": top_keys,
+        "item_count": len(data) if is_list else len(top_keys)
+    }
+
+
+def get_json_dir(json_path: str):
+    """获取 JSON 文件所在目录"""
+    return os.path.dirname(json_path)
 
 
 @app.get("/api/json_images")
@@ -487,8 +481,10 @@ def get_json_images(json_path: str, key: str, page: int = 0):
             elif is_image_path(val):
                 paths = [val]
             if paths:
+                # 添加时间戳防止缓存
+                timestamp = int(time.time())
                 selected_images[k] = [
-                    f"/json_image?path={resolve_image_path(p, json_dir)}"
+                    f"/json_image?path={resolve_image_path(p, json_dir)}&t={timestamp}"
                     for p in paths
                 ]
 
@@ -502,13 +498,15 @@ def get_json_images(json_path: str, key: str, page: int = 0):
                 continue
             if is_image_path(v):
                 other_images[k] = v
-                other_image_urls[k] = f"/json_image?path={resolve_image_path(v, json_dir)}"
+                timestamp = int(time.time())
+                other_image_urls[k] = f"/json_image?path={resolve_image_path(v, json_dir)}&t={timestamp}"
             elif isinstance(v, list):
                 img_list = [x for x in v if is_image_path(x)]
                 if img_list:
                     other_images[k] = img_list
+                    timestamp = int(time.time())
                     other_image_urls[k] = [
-                        f"/json_image?path={resolve_image_path(p, json_dir)}" for p in img_list
+                        f"/json_image?path={resolve_image_path(p, json_dir)}&t={timestamp}" for p in img_list
                     ]
 
         filtered.append({
@@ -544,9 +542,10 @@ def get_json_image(path: str):
     if ext not in IMAGE_EXTENSIONS:
         return {"error": "not an image"}
 
-    # 生成缩略图缓存路径
+    # 获取文件修改时间用于缓存键
+    file_mtime = os.path.getmtime(path)
     import hashlib
-    cache_key = hashlib.md5(path.encode("utf-8")).hexdigest()
+    cache_key = hashlib.md5(f"{path}{file_mtime}".encode("utf-8")).hexdigest()
     cache_folder = os.path.join(THUMB_DIR, "_json_images")
     os.makedirs(cache_folder, exist_ok=True)
     thumb_path = os.path.join(cache_folder, cache_key + ".jpg")
@@ -561,7 +560,12 @@ def get_json_image(path: str):
         except:
             return FileResponse(path)
 
-    return FileResponse(thumb_path)
+    # 添加不缓存头
+    response = FileResponse(thumb_path)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/json_image_full")
@@ -577,3 +581,8 @@ def get_json_image_full(path: str):
         return {"error": "not an image"}
 
     return FileResponse(path)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
